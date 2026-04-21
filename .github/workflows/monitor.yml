@@ -1,0 +1,52 @@
+name: Monitor productos
+
+on:
+  schedule:
+    # Cada 5 minutos (es el mínimo que permite GitHub Actions).
+    # Nota: los horarios de GitHub Actions pueden demorarse varios minutos
+    # durante horas pico; no es un cron exacto.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:  # Permite ejecutarlo manualmente desde la pestaña Actions
+
+# Necesitamos permiso de escritura para que el workflow pueda commitear state.json
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitor.py
+
+      - name: Commit state.json si cambió
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git add state.json
+            git commit -m "chore: actualizar state.json [skip ci]"
+            git push
+          else
+            echo "Sin cambios en state.json"
+          fi
