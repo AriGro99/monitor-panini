@@ -115,25 +115,46 @@ def parse_meli(html_text: str, base_url: str) -> dict:
     soup = BeautifulSoup(html_text, "html.parser")
     products = {}
 
+    # Buscar TODOS los links que contengan MLA (items reales)
     for a in soup.find_all("a", href=True):
         href = a["href"]
 
-        m = re.search(r"/MLA-(\d+)-", href)
+        # Detectar ID MLA (mucho más robusto)
+        m = re.search(r"(MLA\d+)", href)
         if not m:
             continue
 
-        pid = "MLA" + m.group(1)
+        pid = m.group(1)
+
         if pid in products:
             continue
 
-        name = a.get_text(strip=True)
+        # Nombre (varios fallbacks)
+        name = ""
+        if a.get_text(strip=True):
+            name = a.get_text(strip=True)
+
+        if not name:
+            img = a.find("img")
+            if img and img.get("alt"):
+                name = img["alt"]
+
+        if not name:
+            name = a.get("title", "")
+
         if not name:
             continue
+
+        # Limpiar nombre
+        name = html.unescape(name.strip())
+
+        # Limpiar URL
+        clean_url = href.split("#")[0]
 
         products[pid] = {
             "id": pid,
             "name": name,
-            "url": href,
+            "url": clean_url,
             "price": "",
             "in_stock": True,
         }
