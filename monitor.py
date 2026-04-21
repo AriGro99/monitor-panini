@@ -180,7 +180,9 @@ def run():
 
         html_text = fetch(site["url"])
         products = PARSERS[site["parser"]](html_text, site["url"])
-
+        
+        print(f"{site['name']} → {len(products)} productos")
+        
         prev = state.get(site["key"], {}).get("products", {})
 
         for pid, prod in products.items():
