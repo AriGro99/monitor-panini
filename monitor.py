@@ -34,11 +34,8 @@ SITES = [
 ]
 
 # -------- Filtro --------
-KEYWORDS_ANY_OF = [
-    ["mundial", "2026"],
-    ["world cup", "2026"],
-    ["fifa", "2026"],
-]
+KEYWORDS_ANY_OF = []
+
 KEYWORDS_EXCLUDE = ["adrenalyn"]
 
 
