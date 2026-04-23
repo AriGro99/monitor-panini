@@ -204,22 +204,55 @@ def tg_send(text: str) -> bool:
         return False
 
 
+def _precio_line(prod: dict) -> str:
+    """Línea de precio formateada, vacía si no hay precio."""
+    return f"\n💲 <b>Precio:</b> {prod['price']}" if prod.get("price") else ""
+
+
+def _stock_line(prod: dict) -> str:
+    """Indica disponibilidad."""
+    return "✅ En stock" if prod.get("in_stock") else "⚠️ Sin stock confirmado"
+
+
 def fmt_new(site: str, prod: dict) -> str:
-    precio = f"\n💲 {prod['price']}" if prod.get("price") else ""
-    return f"🆕 <b>Producto nuevo</b> — {site}\n{prod['name']}{precio}\n{prod['url']}"
+    return (
+        "🚨🆕 <b>¡PRODUCTO NUEVO DETECTADO!</b> 🚨\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 <b>{prod['name']}</b>\n"
+        f"🏪 <b>Tienda:</b> {site}\n"
+        f"{_precio_line(prod)}\n"
+        f"📊 {_stock_line(prod)}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🛒 <a href=\"{prod['url']}\">👉 IR A COMPRAR AHORA</a>\n"
+        "⚡ ¡Entrá antes que se agote!"
+    )
 
 
 def fmt_restock(site: str, prod: dict) -> str:
-    precio = f"\n💲 {prod['price']}" if prod.get("price") else ""
-    return f"🔄 <b>Volvió al stock</b> — {site}\n{prod['name']}{precio}\n{prod['url']}"
+    return (
+        "🔔🔄 <b>¡VOLVIÓ AL STOCK!</b> 🔔\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 <b>{prod['name']}</b>\n"
+        f"🏪 <b>Tienda:</b> {site}\n"
+        f"{_precio_line(prod)}\n"
+        "📊 ✅ Disponible nuevamente\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🛒 <a href=\"{prod['url']}\">👉 IR A COMPRAR AHORA</a>\n"
+        "⚡ ¡Estaba agotado, aprovechá!"
+    )
 
 
 def fmt_price_change(site: str, prod: dict, old_price: str) -> str:
     return (
-        f"💰 <b>Cambio de precio</b> — {site}\n"
-        f"{prod['name']}\n"
-        f"Antes: {old_price} → Ahora: {prod['price']}\n"
-        f"{prod['url']}"
+        "💰📉 <b>¡CAMBIO DE PRECIO!</b> 💰\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 <b>{prod['name']}</b>\n"
+        f"🏪 <b>Tienda:</b> {site}\n"
+        f"📊 {_stock_line(prod)}\n"
+        f"🔴 <b>Antes:</b> {old_price}\n"
+        f"🟢 <b>Ahora:</b> {prod['price']}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🛒 <a href=\"{prod['url']}\">👉 IR A COMPRAR AHORA</a>"
     )
 
 
