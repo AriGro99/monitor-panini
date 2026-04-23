@@ -8,6 +8,10 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch: # Ejecutar manualmente desde la pestaña Actions
 
+# Heartbeat semanal: lunes 9 AM (hora Argentina = UTC-3 → 12:00 UTC)
+# Descomentar para activar:
+# - cron: "0 12 * * 1"
+
 # Permiso de escritura para commitear state.json
 permissions:
   contents: write
@@ -20,7 +24,8 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 3 ejecuciones x 90s de espera + margen = 8 min máximo
+    timeout-minutes: 8
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -34,13 +39,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run monitor
+      # ── Ejecución 1/3 ──────────────────────────────────────────────
+      - name: "Run monitor [1/3]"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_INDEX: "1"
         run: python monitor.py
 
-      - name: Commit state.json si cambió
+      - name: Commit state.json [1/3]
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -48,6 +55,46 @@ jobs:
             git add state.json
             git commit -m "chore: actualizar state.json [skip ci]"
             git push
-          else
-            echo "Sin cambios en state.json"
+          fi
+
+      - name: Esperar 90 segundos
+        run: sleep 90
+
+      # ── Ejecución 2/3 ──────────────────────────────────────────────
+      - name: "Run monitor [2/3]"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_INDEX: "2"
+        run: |
+          git pull --rebase
+          python monitor.py
+
+      - name: Commit state.json [2/3]
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git add state.json
+            git commit -m "chore: actualizar state.json [skip ci]"
+            git push
+          fi
+
+      - name: Esperar 90 segundos
+        run: sleep 90
+
+      # ── Ejecución 3/3 ──────────────────────────────────────────────
+      - name: "Run monitor [3/3]"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_INDEX: "3"
+        run: |
+          git pull --rebase
+          python monitor.py
+
+      - name: Commit state.json [3/3]
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git add state.json
+            git commit -m "chore: actualizar state.json [skip ci]"
+            git push
           fi
