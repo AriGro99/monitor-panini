@@ -17,8 +17,8 @@ import requests
 from bs4 import BeautifulSoup
 
 # -------- Configuracion --------
-TG_TOKEN  = os.environ["TG_TOKEN"]
-TG_CHAT   = os.environ["TG_CHAT"]
+TG_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
+TG_CHAT   = os.environ["TELEGRAM_CHAT_ID"]
 STATE_FILE = "state.json"
 
 # Tienda Panini en MercadoLibre Argentina – scraping HTML paginado
