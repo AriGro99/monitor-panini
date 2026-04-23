@@ -1,4 +1,8 @@
-from __future__ import annotations
+#!/usr/bin/env python3
+"""
+monitor-panini  –  Detecta productos Panini FIFA Mundial 2026
+Monitorea: Zonakids, Tienda Panini (Magento), ML Tienda Panini (HTML scraping)
+"""
 
 import html
 import json
@@ -7,40 +11,32 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from typing import Any
+from datetime import datetime, timezone
 
 import requests
 from bs4 import BeautifulSoup
 
-# -------- Config --------
-STATE_FILE = Path(__file__).parent / "state.json"
-TIMEOUT = 15
-MAX_RETRIES = 3
+# -------- Configuracion --------
+TG_TOKEN  = os.environ["TG_TOKEN"]
+TG_CHAT   = os.environ["TG_CHAT"]
+STATE_FILE = "state.json"
 
-HEADERS = {
+# Tienda Panini en MercadoLibre Argentina – scraping HTML paginado
+ML_STORE_URL = "https://www.mercadolibre.com.ar/tienda/panini"
+ML_STORE_PAGES = 4   # cuantas paginas scrapear (48 items/pag = 192 productos)
+
+# Headers que simulan un browser real (evita bloqueos de ML)
+BROWSER_HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+    "Accept-Language": "es-AR,es;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
 }
-
-TG_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-RUN_INDEX  = os.environ.get("RUN_INDEX", "1")
-IS_HEARTBEAT = os.environ.get("HEARTBEAT", "").lower() == "true"
-
-SITES = [
-    {"key": "zonakids",     "name": "Zonakids",          "url": "https://zonakids.com/",                         "parser": "magento"},
-    {"key": "tiendapanini", "name": "Tienda Panini",      "url": "https://tiendapanini.com.ar/",                  "parser": "magento"},
-    {"key": "ml_panini",    "name": "ML - Tienda Panini", "url": "https://www.mercadolibre.com.ar/tienda/panini", "parser": "meli"},
-]
-
-# Seller ID de la tienda oficial Panini en MercadoLibre Argentina
-# Obtenido del HTML de https://www.mercadolibre.com.ar/tienda/panini
-ML_SELLER_ID = "179589170"
-ML_API_BASE  = "https://api.mercadolibre.com"
 
 # -------- Filtro --------
 KEYWORDS_ANY_OF = [
@@ -61,394 +57,445 @@ def matches_keywords(name: str) -> bool:
     return any(all(tok in n for tok in group) for group in KEYWORDS_ANY_OF)
 
 
-# -------- Utils --------
+# -------- Estado persistente --------
 
-def log(msg: str) -> None:
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
-
-
-def fetch(url: str) -> str:
-    """GET con reintentos (backoff lineal)."""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.text
-        except requests.RequestException as e:
-            log(f"[fetch] intento {attempt}/{MAX_RETRIES} falló: {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(attempt * 3)
-    raise RuntimeError(f"No se pudo obtener {url} tras {MAX_RETRIES} intentos")
+def load_state() -> dict:
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            return data
+    except Exception:
+        return {}
 
 
-def fetch_json(url: str):
-    """GET JSON con reintentos."""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            r = requests.get(url, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as e:
-            log(f"[fetch_json] intento {attempt}/{MAX_RETRIES} falló: {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(attempt * 3)
-    raise RuntimeError(f"No se pudo obtener JSON de {url} tras {MAX_RETRIES} intentos")
-def load_state() -> dict[str, Any]:
-    """Carga state.json; lo resetea si está corrupto."""
-    if STATE_FILE.exists():
-        try:
-            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-            log("[state] JSON inválido (no es dict), reseteando")
-        except json.JSONDecodeError as e:
-            log(f"[state] JSON corrupto: {e} — reseteando")
-    return {}
-
-
-def save_state(state: dict[str, Any]) -> None:
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-# -------- Parsers --------
-
-def parse_magento(html_text: str, base_url: str) -> dict:
-    """Parsea tiendas Magento siguiendo paginación automáticamente."""
-    products: dict = {}
-    page = 1
-
-    while True:
-        url = f"{base_url.rstrip('/')}/?p={page}" if page > 1 else base_url
-        try:
-            text = html_text if page == 1 else fetch(url)
-        except RuntimeError:
-            break
-
-        soup = BeautifulSoup(text, "html.parser")
-        items = soup.select("li.product-item")
-
-        if not items:
-            break
-
-        for node in items:
-            pid_el = node.find(attrs={"data-product-id": True})
-            if not pid_el:
-                continue
-
-            pid      = pid_el["data-product-id"]
-            name_el  = node.select_one("a.product-item-link")
-            name     = name_el.get_text(strip=True) if name_el else ""
-            url_prod = name_el["href"] if name_el else ""
-
-            if url_prod.startswith("/"):
-                url_prod = base_url.rstrip("/") + url_prod
-
-            price_el = node.select_one(".price")
-            price    = price_el.get_text(strip=True) if price_el else ""
-
-            raw      = node.get_text().lower()
-            in_stock = not any(x in raw for x in ["agotado", "sin stock"])
-
-            products[pid] = {
-                "id": pid, "name": name, "url": url_prod,
-                "price": price, "in_stock": in_stock,
-            }
-
-        next_btn = soup.select_one("a.action.next, li.pages-item-next a")
-        if not next_btn:
-            break
-        page += 1
-
-    return products
-
-
-def parse_meli_html(html_text: str, base_url: str) -> dict:
-    """Fallback HTML para ML."""
-    soup = BeautifulSoup(html_text, "html.parser")
-    products: dict = {}
-
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        m = re.search(r"(MLA\d+)", href)
-        if not m:
-            continue
-        pid = m.group(1)
-        if pid in products:
-            continue
-
-        name = a.get_text(strip=True)
-        if not name:
-            img = a.find("img")
-            name = img["alt"] if img and img.get("alt") else a.get("title", "")
-        if not name:
-            continue
-
-        name = html.unescape(name.strip())
-        price = ""
-        container = a.find_parent()
-        if container:
-            price_el = container.select_one(
-                ".andes-money-amount__fraction, .price-tag-fraction, [class*='price']"
-            )
-            if price_el:
-                price = price_el.get_text(strip=True)
-
-        products[pid] = {
-            "id": pid, "name": name, "url": href.split("#")[0],
-            "price": price, "in_stock": True,
-        }
-    return products
-
-def parse_meli_api(_html_text: str, _base_url: str) -> dict:
-    """
-    API oficial de MercadoLibre: precio, stock y todos los productos del seller.
-    Usa ML_SELLER_ID hardcodeado (tienda oficial Panini AR).
-    """
-    products: dict = {}
-    offset = 0
-    limit  = 50
-
-    while True:
-        url = (f"{ML_API_BASE}/sites/MLA/search"
-               f"?seller_id={ML_SELLER_ID}&limit={limit}&offset={offset}")
-        try:
-            data = fetch_json(url)
-        except RuntimeError as e:
-            log(f"[ML API] error: {e} — usando fallback HTML")
-            return {}
-
-        results = data.get("results", [])
-        if not results:
-            break
-
-        for item in results:
-            pid       = item.get("id", "")
-            name      = item.get("title", "")
-            price_val = item.get("price")
-            price     = f"${price_val:,.0f}".replace(",", ".") if price_val else ""
-            permalink = item.get("permalink", "")
-            avail_qty = item.get("available_quantity", 0)
-            in_stock  = avail_qty > 0
-            products[pid] = {
-                "id": pid, "name": name, "url": permalink,
-                "price": price, "in_stock": in_stock,
-            }
-
-        total  = data.get("paging", {}).get("total", 0)
-        offset += limit
-        if offset >= total:
-            break
-
-    log(f"[ML API] {len(products)} productos via API oficial")
-    return products
-
-PARSERS = {"magento": parse_magento, "meli": parse_meli_api, "meli_html": parse_meli_html}
+def save_state(state: dict) -> None:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATE_FILE)
 
 
 # -------- Telegram --------
 
-def tg_send(text: str) -> bool:
-    if not TG_TOKEN or not TG_CHAT_ID:
-        log("Telegram no configurado")
-        return False
+def tg_send(msg: str) -> None:
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    try:
-        resp = requests.post(
-            url,
-            json={
-                "chat_id": TG_CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=TIMEOUT,
+    payload = {
+        "chat_id": TG_CHAT,
+        "text": msg,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }
+    for attempt in range(3):
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            r.raise_for_status()
+            return
+        except Exception as e:
+            if attempt == 2:
+                print(f"[TG] Error al enviar mensaje: {e}", flush=True)
+            time.sleep(2)
+
+
+# -------- HTTP helpers --------
+
+def fetch_html(url: str, extra_headers: dict | None = None, retries: int = 3) -> str:
+    """Descarga HTML con headers de browser. Retries incluidos."""
+    headers = dict(BROWSER_HEADERS)
+    if extra_headers:
+        headers.update(extra_headers)
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
+            print(f"[fetch_html] intento {attempt+1}/{retries} fallo: {e}", flush=True)
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"No se pudo obtener HTML de {url} tras {retries} intentos")
+
+
+def fetch_json(url: str, retries: int = 3) -> dict | list:
+    """Descarga JSON sin headers especiales (para APIs que no requieren autenticacion)."""
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            print(f"[fetch_json] intento {attempt+1}/{retries} fallo: {e}", flush=True)
+            if attempt < retries - 1:
+                time.sleep(3)
+    raise RuntimeError(f"No se pudo obtener JSON de {url} tras {retries} intentos")
+
+
+# -------- Parsers de cada fuente --------
+
+def parse_zonakids(url: str) -> dict:
+    """Magento store – paginacion via ?p=N"""
+    products: dict = {}
+    page = 1
+    while True:
+        purl = f"{url}?p={page}" if page > 1 else url
+        html_text = fetch_html(purl)
+        soup = BeautifulSoup(html_text, "html.parser")
+        items = soup.select(".product-item, .item.product")
+        if not items:
+            break
+        found_new = False
+        for item in items:
+            a = item.select_one("a.product-item-link, a[class*='product']") or item.find("a", href=True)
+            if not a:
+                continue
+            name = a.get_text(strip=True)
+            href = a.get("href", "")
+            if not name or not href:
+                continue
+            pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
+            if pid and pid not in products:
+                products[pid] = {
+                    "name": html.unescape(name),
+                    "url": href,
+                    "price": "",
+                    "source": "Zonakids",
+                }
+                found_new = True
+        if not found_new:
+            break
+        page += 1
+        if page > 10:
+            break
+        time.sleep(0.5)
+    return products
+
+
+def parse_tienda_panini(url: str) -> dict:
+    """Magento store Tienda Panini – paginacion via ?p=N"""
+    products: dict = {}
+    page = 1
+    while True:
+        purl = f"{url}?p={page}" if page > 1 else url
+        html_text = fetch_html(purl)
+        soup = BeautifulSoup(html_text, "html.parser")
+        items = soup.select(".product-item, .item.product")
+        if not items:
+            break
+        found_new = False
+        for item in items:
+            a = item.select_one("a.product-item-link, a[class*='product']") or item.find("a", href=True)
+            if not a:
+                continue
+            name = a.get_text(strip=True)
+            href = a.get("href", "")
+            if not name or not href:
+                continue
+            pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
+            price_el = item.select_one(".price")
+            price = price_el.get_text(strip=True) if price_el else ""
+            if pid and pid not in products:
+                products[pid] = {
+                    "name": html.unescape(name),
+                    "url": href,
+                    "price": price,
+                    "source": "Tienda Panini",
+                }
+                found_new = True
+        if not found_new:
+            break
+        page += 1
+        if page > 10:
+            break
+        time.sleep(0.5)
+    return products
+
+
+def _ml_page_url(page_num: int) -> str:
+    """Genera la URL de paginacion de la tienda Panini en ML.
+    ML usa offset 48 por pagina: _Desde_49_, _Desde_97_, etc.
+    """
+    if page_num == 1:
+        return ML_STORE_URL
+    offset = (page_num - 1) * 48 + 1
+    return f"{ML_STORE_URL}/_Desde_{offset}_NoIndex_True"
+
+
+def parse_ml_tienda(url: str) -> dict:
+    """
+    Scraping HTML paginado de la Tienda Panini en MercadoLibre.
+    Ignora la API REST (requiere OAuth, siempre 403).
+    Descarga ML_STORE_PAGES paginas con User-Agent de browser.
+    """
+    products: dict = {}
+    pages_fetched = 0
+
+    for page_num in range(1, ML_STORE_PAGES + 1):
+        page_url = _ml_page_url(page_num)
+        try:
+            html_text = fetch_html(page_url)
+        except Exception as e:
+            print(f"[ML HTML] pagina {page_num} fallo: {e}", flush=True)
+            break
+
+        soup = BeautifulSoup(html_text, "html.parser")
+
+        # Selectores de productos en ML (tienda oficial)
+        items = soup.select(
+            ".ui-search-result__wrapper, "
+            ".andes-card--flat, "
+            "li.ui-search-layout__item"
         )
-        resp.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        log(f"[tg_send] error: {e}")
-        return False
+
+        if not items:
+            # Intentar fallback con selector generico de links MLA
+            items = [None]  # trigger fallback below
+
+        found_new = 0
+
+        if items == [None]:
+            # Fallback: buscar todos los links con MLA en href
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                m = re.search(r"(MLA-?\d+)", href)
+                if not m:
+                    continue
+                pid = m.group(1).replace("-", "")
+                if pid in products:
+                    continue
+                name = a.get_text(strip=True)
+                if not name:
+                    img = a.find("img")
+                    name = img["alt"] if img and img.get("alt") else ""
+                if not name:
+                    continue
+                # Clean URL (remove tracking params)
+                clean_href = href.split("?")[0].split("#")[0]
+                products[pid] = {
+                    "name": html.unescape(name.strip()),
+                    "url": clean_href,
+                    "price": "",
+                    "source": "ML Tienda Panini",
+                }
+                found_new += 1
+        else:
+            for item in items:
+                # Nombre del producto
+                name_el = item.select_one(
+                    ".ui-search-item__title, "
+                    "[class*='title'], "
+                    "h2, h3"
+                )
+                name = name_el.get_text(strip=True) if name_el else ""
+
+                # Link del producto
+                a = item.find("a", href=True)
+                if not a:
+                    continue
+                href = a["href"]
+                m = re.search(r"(MLA-?\d+)", href)
+                if not m:
+                    continue
+                pid = m.group(1).replace("-", "")
+
+                if not name:
+                    img = item.find("img")
+                    name = img["alt"] if img and img.get("alt") else ""
+                if not name or pid in products:
+                    continue
+
+                # Precio
+                price_el = item.select_one(
+                    ".andes-money-amount__fraction, "
+                    ".price-tag-fraction, "
+                    "[class*='price']"
+                )
+                price = price_el.get_text(strip=True) if price_el else ""
+
+                clean_href = href.split("?")[0].split("#")[0]
+                products[pid] = {
+                    "name": html.unescape(name.strip()),
+                    "url": clean_href,
+                    "price": price,
+                    "source": "ML Tienda Panini",
+                }
+                found_new += 1
+
+        pages_fetched += 1
+        print(f"[ML HTML] pagina {page_num}: {found_new} nuevos, total {len(products)}", flush=True)
+
+        if found_new == 0 and pages_fetched > 1:
+            # Nada nuevo en esta pagina, probablemente llegamos al final
+            break
+
+        if page_num < ML_STORE_PAGES:
+            time.sleep(1)
+
+    print(f"[ML Tienda Panini] {len(products)} productos via HTML scraping ({pages_fetched} paginas)", flush=True)
+    return products
 
 
-# -------- Formateo de alertas --------
+# -------- SOURCES --------
 
-def _precio_line(prod: dict) -> str:
-    return f"\n\U0001f4b2 <b>Precio:</b> {prod['price']}" if prod.get('price') else ""
-
-
-def _stock_line(prod: dict) -> str:
-    return "\u2705 En stock" if prod.get('in_stock') else "\u26a0\ufe0f Sin stock confirmado"
-
-
-def fmt_new(site: str, prod: dict) -> str:
-    return (
-        "\U0001f6a8\U0001f195 <b>\u00a1PRODUCTO NUEVO DETECTADO!</b> \U0001f6a8\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        f"\U0001f4e6 <b>{prod['name']}</b>\n"
-        f"\U0001f3ea <b>Tienda:</b> {site}\n"
-        f"{_precio_line(prod)}\n"
-        f"{_stock_line(prod)}\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        f"\U0001f6d2 <a href=\"{prod['url']}\">\U0001f449 IR A COMPRAR AHORA</a>\n"
-        "\u26a1 \u00a1Entr\u00e1 antes que se agote!"
-    )
+SOURCES = [
+    {
+        "name": "Zonakids",
+        "url": "https://www.zonakids.com.ar/catalogsearch/result/?q=panini",
+        "parser": parse_zonakids,
+    },
+    {
+        "name": "Tienda Panini",
+        "url": "https://tienda.panini.com.ar/catalogsearch/result/?q=album",
+        "parser": parse_tienda_panini,
+    },
+    {
+        "name": "ML Tienda Panini",
+        "url": ML_STORE_URL,
+        "parser": parse_ml_tienda,
+    },
+]
 
 
-def fmt_restock(site: str, prod: dict) -> str:
-    return (
-        "\U0001f514\U0001f504 <b>\u00a1VOLVIÓ AL STOCK!</b> \U0001f514\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        f"\U0001f4e6 <b>{prod['name']}</b>\n"
-        f"\U0001f3ea <b>Tienda:</b> {site}\n"
-        f"{_precio_line(prod)}\n"
-        "\u2705 Disponible nuevamente\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        f"\U0001f6d2 <a href=\"{prod['url']}\">\U0001f449 IR A COMPRAR AHORA</a>\n"
-        "\u26a1 \u00a1Estaba agotado, aprovech\u00e1!"
-    )
+# -------- Comparacion y alertas --------
 
-
-def fmt_price_change(site: str, prod: dict, old_price: str) -> str:
-    return (
-        "\U0001f4b0\U0001f4c9 <b>\u00a1CAMBIO DE PRECIO!</b> \U0001f4b0\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        f"\U0001f4e6 <b>{prod['name']}</b>\n"
-        f"\U0001f3ea <b>Tienda:</b> {site}\n"
-        f"{_stock_line(prod)}\n"
-        f"\U0001f534 <b>Antes:</b> {old_price}\n"
-        f"\U0001f7e2 <b>Ahora:</b> {prod['price']}\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        f"\U0001f6d2 <a href=\"{prod['url']}\">\U0001f449 IR A COMPRAR AHORA</a>"
-    )
-
-
-def fmt_site_error(site_name: str) -> str:
-    return (
-        f"\u26a0\ufe0f <b>Error de conexi\u00f3n</b>\n"
-        f"No se pudo acceder a <b>{site_name}</b> tras {MAX_RETRIES} intentos.\n"
-        "El monitoreo de ese sitio se salt\u00f3 en este ciclo."
-    )
-
-
-def fmt_heartbeat(state: dict) -> str:
-    lines = ["\U0001f49a <b>Bot activo \u2014 Monitor Panini</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"]
-    total = 0
-    for site in SITES:
-        count = len(state.get(site['key'], {}).get('products', {}))
-        total += count
-        lines.append(f"\U0001f3ea {site['name']}: <b>{count}</b> productos")
-    lines.append(f"\n\U0001f4e6 Total monitoreado: <b>{total}</b> productos")
-    lines.append("\u23f1\ufe0f Frecuencia: cada ~90 segundos (3 checks por ciclo de 5 min)")
-    return "\n".join(lines)
-
-
-def fmt_first_run(state: dict) -> str:
-    lines = ["\U0001f916 <b>Monitor Panini iniciado</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501", "Estado inicial guardado:"]
-    total = 0
-    for site in SITES:
-        count = len(state.get(site['key'], {}).get('products', {}))
-        total += count
-        lines.append(f"  \u2022 {site['name']}: <b>{count}</b> productos")
-    lines.append(f"\n\U0001f4e6 Total: <b>{total}</b> productos en seguimiento")
-    lines.append("\nA partir de ahora te avisar\u00e9 cuando haya cambios. \U0001f440")
-    return "\n".join(lines)
-
-
-# -------- Procesamiento paralelo --------
-
-def process_site(site: dict, state: dict) -> tuple:
-    """Fetch + parse + diff de un sitio. Corre en thread paralelo."""
-    alerts: list = []
-    error_msg = None
+def check_source(source: dict, state: dict) -> tuple[list[str], list[str]]:
+    """
+    Chequea una fuente. Devuelve (alertas, errores).
+    alertas = lista de mensajes Telegram.
+    errores = lista de strings descriptivos.
+    """
+    name = source["name"]
+    url  = source["url"]
+    alerts: list[str] = []
+    errors: list[str] = []
 
     try:
-        html_text = fetch(site['url'])
-    except RuntimeError as e:
-        log(f"[ERROR] {site['name']}: {e}")
-        return alerts, None, fmt_site_error(site['name'])
+        current = source["parser"](url)
+    except Exception as e:
+        err = f"{name}: {e}"
+        errors.append(err)
+        print(f"[ERROR] {err}", flush=True)
+        return alerts, errors
 
-    parser_key = site['parser']
-    products   = PARSERS[parser_key](html_text, site['url'])
+    print(f"{name} \u2192 {len(current)} productos", flush=True)
 
-    # Fallback HTML si la API de ML devuelve vacío
-    if parser_key == 'meli' and not products:
-        log('[ML] API vacía, usando fallback HTML')
-        products = parse_meli_html(html_text, site['url'])
+    prev = state.get(name, {})
+    first_run = not prev
 
-    log(f"{site['name']} \u2192 {len(products)} productos")
+    matched: list[dict] = []
 
-    prev = state.get(site['key'], {}).get('products', {})
-
-    for pid, prod in products.items():
-        if not matches_keywords(prod['name']):
+    for pid, prod in current.items():
+        if not matches_keywords(prod["name"]):
             continue
-        old = prev.get(pid)
-        if old is None:
-            alerts.append(fmt_new(site['name'], prod))
+
+        prev_prod = prev.get(pid)
+
+        if prev_prod is None:
+            if not first_run:
+                prod["_alert_type"] = "nuevo"
+            matched.append((pid, prod))
         else:
-            if not old.get('in_stock') and prod.get('in_stock'):
-                alerts.append(fmt_restock(site['name'], prod))
-            old_price = old.get('price', '')
-            new_price = prod.get('price', '')
-            if old_price and new_price and old_price != new_price:
-                alerts.append(fmt_price_change(site['name'], prod, old_price))
+            # Chequear restock
+            was_unavailable = prev_prod.get("unavailable", False)
+            if was_unavailable:
+                prod["_alert_type"] = "restock"
+                matched.append((pid, prod))
+            # Chequear cambio de precio
+            elif prod.get("price") and prev_prod.get("price") and prod["price"] != prev_prod["price"]:
+                prod["_alert_type"] = "precio"
+                prod["_old_price"] = prev_prod["price"]
+                matched.append((pid, prod))
 
-    return alerts, products, error_msg
+    if matched and not first_run:
+        msgs: list[str] = []
+        for pid, prod in matched:
+            atype = prod.get("_alert_type", "nuevo")
+            pname = prod["name"]
+            purl  = prod["url"]
+            price = prod.get("price", "")
 
+            if atype == "nuevo":
+                header = "\U0001F6A8\u00a1NUEVO PRODUCTO DETECTADO!"
+            elif atype == "restock":
+                header = "\U0001F514 RESTOCK DETECTADO"
+            else:
+                header = "\U0001F4B0 CAMBIO DE PRECIO"
 
-# -------- Main --------
+            price_line = f"\n\U0001F4B2 Precio: {price}" if price else ""
+            if atype == "precio":
+                price_line = f"\n\U0001F4B2 Precio: {prod.get('_old_price','')} \u2192 {price}"
 
-def run():
-    state      = load_state()
-    first_run  = not state
-
-    if IS_HEARTBEAT:
-        log('Modo heartbeat')
-        tg_send(fmt_heartbeat(state))
-        return 0
-
-    all_alerts: list = []
-    all_errors: list = []
-    new_state = dict(state)
-
-    log(f"[Run {RUN_INDEX}/3] Procesando {len(SITES)} sitios en paralelo...")
-
-    with ThreadPoolExecutor(max_workers=len(SITES)) as executor:
-        future_to_site = {executor.submit(process_site, site, state): site for site in SITES}
-        for future in as_completed(future_to_site):
-            site = future_to_site[future]
-            try:
-                alerts, products, error_msg = future.result()
-                if products is not None:
-                    new_state[site['key']] = {'products': products}
-                if alerts:
-                    all_alerts.extend(alerts)
-                if error_msg:
-                    all_errors.append(error_msg)
-            except Exception as e:
-                log(f"[ERROR inesperado] {site['name']}: {e}")
-                all_errors.append(fmt_site_error(site['name']))
-
-    if not first_run:
-        if len(all_alerts) > 1:
-            grouped = (
-                f"\U0001f525 <b>{len(all_alerts)} alertas nuevas</b> \U0001f525\n"
-                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
-                + "\n\n".join(all_alerts)
+            msg = (
+                f"{header}\n"
+                f"\U0001F3EA Tienda: {name}\n"
+                f"\U0001F4E6 Producto: <b>{pname}</b>{price_line}\n"
+                f"\U0001F517 <a href='{purl}'>VER AHORA \u27a1</a>\n"
+                f"\u23F0 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
             )
-            tg_send(grouped)
-        elif len(all_alerts) == 1:
-            tg_send(all_alerts[0])
-        for err in all_errors:
-            tg_send(err)
-            time.sleep(0.5)
-    elif first_run:
-        tg_send(fmt_first_run(new_state))
+            msgs.append(msg)
+        alerts.append("\n\n".join(msgs))
 
-    save_state(new_state)
-    log(f"[Run {RUN_INDEX}/3] Listo. {len(all_alerts)} alertas, {len(all_errors)} errores.")
-    return 0
+    if first_run and matched:
+        names_list = ", ".join(p["name"] for _, p in matched[:5])
+        summary = (
+            f"\u2705 <b>Primera ejecucion – {name}</b>\n"
+            f"Productos con keywords: {len(matched)}\n"
+            f"Ejemplos: {names_list}"
+        )
+        alerts.append(summary)
+
+    # Actualizar estado
+    state[name] = current
+
+    return alerts, errors
+
+
+# -------- Loop principal --------
+
+def run_check() -> tuple[int, int]:
+    """Ejecuta un ciclo completo. Devuelve (n_alertas, n_errores)."""
+    state = load_state()
+
+    all_alerts: list[str] = []
+    all_errors: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as ex:
+        futures = {ex.submit(check_source, src, state): src["name"] for src in SOURCES}
+        for fut in as_completed(futures):
+            src_name = futures[fut]
+            try:
+                al, er = fut.result()
+                all_alerts.extend(al)
+                all_errors.extend(er)
+            except Exception as e:
+                all_errors.append(f"{src_name}: excepcion inesperada: {e}")
+
+    save_state(state)
+
+    for msg in all_alerts:
+        tg_send(msg)
+
+    if all_errors:
+        err_msg = "\u26A0\uFE0F <b>Errores en el monitor</b>\n" + "\n".join(f"\u2022 {e}" for e in all_errors)
+        tg_send(err_msg)
+
+    return len(all_alerts), len(all_errors)
+
+
+def main() -> None:
+    runs   = int(os.environ.get("RUNS", "3"))
+    sleep_s = int(os.environ.get("SLEEP", "90"))
+
+    for i in range(1, runs + 1):
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] [Run {i}/{runs}] Procesando {len(SOURCES)} sitios en paralelo...", flush=True)
+        n_al, n_er = run_check()
+        print(f"[{ts}] [Run {i}/{runs}] Listo. {n_al} alertas, {n_er} errores.", flush=True)
+        if i < runs:
+            time.sleep(sleep_s)
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    main()
