@@ -37,8 +37,8 @@ SITES = [
     {"key": "ml_panini",    "name": "ML - Tienda Panini", "url": "https://www.mercadolibre.com.ar/tienda/panini", "parser": "meli"},
 ]
 
-ML_SELLER_ID = "166666537"
-ML_API_URL   = f"https://api.mercadolibre.com/sites/MLA/search?seller_id={ML_SELLER_ID}&limit=50"
+ML_NICKNAME = "panini"  # Nickname de la tienda oficial en MercadoLibre AR
+ML_API_BASE = "https://api.mercadolibre.com"
 
 # -------- Filtro --------
 KEYWORDS_ANY_OF = [
@@ -197,21 +197,38 @@ def parse_meli_html(html_text: str, base_url: str) -> dict:
         }
     return products
 
+def _get_ml_seller_id() -> str | None:
+    """Resuelve el seller_id buscando la tienda por nickname en la API de ML."""
+    try:
+        data = fetch_json(f"{ML_API_BASE}/users/search?nickname={ML_NICKNAME}")
+        results = data.get("results", [])
+        if results:
+            sid = str(results[0].get("id", ""))
+            log(f"[ML API] seller_id resuelto: {sid}")
+            return sid
+    except Exception as e:
+        log(f"[ML API] no se pudo resolver seller_id: {e}")
+    return None
+
+
 def parse_meli_api(_html_text: str, _base_url: str) -> dict:
-    """
-    Usa la API oficial de MercadoLibre: precio y stock exactos,
-    sin depender de scraping de JavaScript.
-    """
+    """API oficial ML: precio y stock exactos sin scraping JS."""
+    seller_id = _get_ml_seller_id()
+    if not seller_id:
+        log("[ML API] sin seller_id — usando fallback HTML")
+        return {}
+
     products: dict = {}
     offset = 0
     limit  = 50
 
     while True:
-        url = f"{ML_API_URL}&offset={offset}"
+        url = (f"{ML_API_BASE}/sites/MLA/search"
+               f"?seller_id={seller_id}&limit={limit}&offset={offset}")
         try:
             data = fetch_json(url)
         except RuntimeError as e:
-            log(f"[ML API] error: {e} — usando fallback HTML")
+            log(f"[ML API] error: {e}")
             return {}
 
         results = data.get("results", [])
@@ -226,7 +243,6 @@ def parse_meli_api(_html_text: str, _base_url: str) -> dict:
             permalink = item.get("permalink", "")
             avail_qty = item.get("available_quantity", 0)
             in_stock  = avail_qty > 0
-
             products[pid] = {
                 "id": pid, "name": name, "url": permalink,
                 "price": price, "in_stock": in_stock,
@@ -237,9 +253,8 @@ def parse_meli_api(_html_text: str, _base_url: str) -> dict:
         if offset >= total:
             break
 
-    log(f"[ML API] {len(products)} productos obtenidos via API oficial")
+    log(f"[ML API] {len(products)} productos via API oficial")
     return products
-
 
 PARSERS = {"magento": parse_magento, "meli": parse_meli_api, "meli_html": parse_meli_html}
 
