@@ -2,16 +2,17 @@ name: Monitor productos
 
 on:
   schedule:
-    # Cada 5 minutos (es el mínimo que permite GitHub Actions).
-    # Nota: los horarios de GitHub Actions pueden demorarse varios minutos
-    # durante horas pico; no es un cron exacto.
+    # Cada 5 minutos (mínimo permitido por GitHub Actions).
+    # REPO PÚBLICO → Actions son 100% gratuitas, sin límite de minutos.
+    # Si alguna vez lo privás: 2000 min/mes gratis ≈ cada 22 min máximo.
     - cron: "*/5 * * * *"
-  workflow_dispatch:  # Permite ejecutarlo manualmente desde la pestaña Actions
+  workflow_dispatch: # Ejecutar manualmente desde la pestaña Actions
 
-# Necesitamos permiso de escritura para que el workflow pueda commitear state.json
+# Permiso de escritura para commitear state.json
 permissions:
   contents: write
 
+# Evita runs solapados; si hay uno en curso, el nuevo espera
 concurrency:
   group: monitor
   cancel-in-progress: false
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
