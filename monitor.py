@@ -14,7 +14,8 @@ from bs4 import BeautifulSoup
 
 # -------- Config --------
 STATE_FILE = Path(__file__).parent / "state.json"
-TIMEOUT = 25
+TIMEOUT = 20
+MAX_RETRIES = 3
 
 HEADERS = {
     "User-Agent": (
@@ -59,9 +60,17 @@ def log(msg: str) -> None:
 
 
 def fetch(url: str) -> str:
-    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.text
+    """Descarga una URL con reintentos automáticos ante errores transitorios."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            r.raise_for_status()
+            return r.text
+        except requests.RequestException as e:
+            log(f"[fetch] intento {attempt}/{MAX_RETRIES} falló para {url}: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(attempt * 3)
+    raise RuntimeError(f"No se pudo obtener {url} tras {MAX_RETRIES} intentos")
 
 
 def load_state() -> dict[str, Any]:
@@ -115,11 +124,9 @@ def parse_meli(html_text: str, base_url: str) -> dict:
     soup = BeautifulSoup(html_text, "html.parser")
     products = {}
 
-    # Buscar TODOS los links que contengan MLA (items reales)
     for a in soup.find_all("a", href=True):
         href = a["href"]
 
-        # Detectar ID MLA (mucho más robusto)
         m = re.search(r"(MLA\d+)", href)
         if not m:
             continue
@@ -129,33 +136,38 @@ def parse_meli(html_text: str, base_url: str) -> dict:
         if pid in products:
             continue
 
-        # Nombre (varios fallbacks)
-        name = ""
-        if a.get_text(strip=True):
-            name = a.get_text(strip=True)
-
+        # Nombre con fallbacks
+        name = a.get_text(strip=True)
         if not name:
             img = a.find("img")
             if img and img.get("alt"):
                 name = img["alt"]
-
         if not name:
             name = a.get("title", "")
-
         if not name:
             continue
 
-        # Limpiar nombre
         name = html.unescape(name.strip())
 
-        # Limpiar URL
+        # Precio: buscar en el contenedor del link
+        price = ""
+        container = a.find_parent()
+        if container:
+            price_el = container.select_one(
+                ".andes-money-amount__fraction, "
+                ".price-tag-fraction, "
+                "[class*='price']"
+            )
+            if price_el:
+                price = price_el.get_text(strip=True)
+
         clean_url = href.split("#")[0]
 
         products[pid] = {
             "id": pid,
             "name": name,
             "url": clean_url,
-            "price": "",
+            "price": price,
             "in_stock": True,
         }
 
@@ -167,26 +179,48 @@ PARSERS = {"magento": parse_magento, "meli": parse_meli}
 
 # -------- Telegram --------
 
-def tg_send(text: str):
+def tg_send(text: str) -> bool:
+    """Envía un mensaje por Telegram. Retorna True si fue exitoso."""
     if not TG_TOKEN or not TG_CHAT_ID:
         log("Telegram no configurado")
-        return
+        return False
 
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    try:
+        resp = requests.post(
+            url,
+            json={
+                "chat_id": TG_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        log(f"[tg_send] error enviando mensaje: {e}")
+        return False
 
-    requests.post(
-        url,
-        json={
-            "chat_id": TG_CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-        },
-        timeout=TIMEOUT,
+
+def fmt_new(site: str, prod: dict) -> str:
+    precio = f"\n💲 {prod['price']}" if prod.get("price") else ""
+    return f"🆕 <b>Producto nuevo</b> — {site}\n{prod['name']}{precio}\n{prod['url']}"
+
+
+def fmt_restock(site: str, prod: dict) -> str:
+    precio = f"\n💲 {prod['price']}" if prod.get("price") else ""
+    return f"🔄 <b>Volvió al stock</b> — {site}\n{prod['name']}{precio}\n{prod['url']}"
+
+
+def fmt_price_change(site: str, prod: dict, old_price: str) -> str:
+    return (
+        f"💰 <b>Cambio de precio</b> — {site}\n"
+        f"{prod['name']}\n"
+        f"Antes: {old_price} → Ahora: {prod['price']}\n"
+        f"{prod['url']}"
     )
-
-
-def fmt_alert(site, prod):
-    return f"🆕 {site}\n{prod['name']}\n{prod['url']}\n{prod['price']}"
 
 
 # -------- Main --------
@@ -199,11 +233,15 @@ def run():
     for site in SITES:
         log(f"Procesando {site['name']}")
 
-        html_text = fetch(site["url"])
+        try:
+            html_text = fetch(site["url"])
+        except RuntimeError as e:
+            log(f"[ERROR] {site['name']}: {e}")
+            continue
+
         products = PARSERS[site["parser"]](html_text, site["url"])
-        
-        print(f"{site['name']} → {len(products)} productos")
-        
+        log(f"{site['name']} → {len(products)} productos encontrados")
+
         prev = state.get(site["key"], {}).get("products", {})
 
         for pid, prod in products.items():
@@ -213,7 +251,18 @@ def run():
             old = prev.get(pid)
 
             if old is None:
-                alerts.append(fmt_alert(site["name"], prod))
+                # Producto nuevo
+                alerts.append(fmt_new(site["name"], prod))
+            else:
+                # Restock: estaba sin stock y ahora tiene stock
+                if not old.get("in_stock") and prod.get("in_stock"):
+                    alerts.append(fmt_restock(site["name"], prod))
+
+                # Cambio de precio
+                old_price = old.get("price", "")
+                new_price = prod.get("price", "")
+                if old_price and new_price and old_price != new_price:
+                    alerts.append(fmt_price_change(site["name"], prod, old_price))
 
         state[site["key"]] = {"products": products}
 
@@ -221,8 +270,11 @@ def run():
         for a in alerts:
             tg_send(a)
             time.sleep(1)
+    elif first_run:
+        log(f"Primera ejecución: estado inicial guardado ({sum(len(state[k]['products']) for k in state)} productos)")
 
     save_state(state)
+    log(f"Listo. {len(alerts)} alertas enviadas.")
     return 0
 
 
