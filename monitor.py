@@ -26,364 +26,358 @@ ML_STORE_PAGES = 4  # cuantas paginas scrapear (48 items/pag = 192 productos)
 
 # Headers que simulan un browser real (evita bloqueos)
 BROWSER_HEADERS = {
-        "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "es-AR,es;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "es-AR,es;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
 }
 
 # -------- Filtro --------
 KEYWORDS_ANY_OF = [
-        ["mundial", "2026"],
-        ["world cup", "2026"],
-        ["fifa", "2026"],
+    ["mundial", "2026"],
+    ["world cup", "2026"],
+    ["fifa", "2026"],
 ]
 KEYWORDS_EXCLUDE = ["adrenalyn"]
 
 
 def matches_keywords(name: str) -> bool:
-        n = name.lower()
-        if any(excl in n for excl in KEYWORDS_EXCLUDE):
-                    return False
-                if not KEYWORDS_ANY_OF:
-                            return True
-                        return any(all(tok in n for tok in group) for group in KEYWORDS_ANY_OF)
+    n = name.lower()
+    if any(excl in n for excl in KEYWORDS_EXCLUDE):
+        return False
+    if not KEYWORDS_ANY_OF:
+        return True
+    return any(all(tok in n for tok in group) for group in KEYWORDS_ANY_OF)
 
 
 # -------- Estado persistente --------
 def load_state() -> dict:
-        if not os.path.exists(STATE_FILE):
-                    return {}
-                try:
-                            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                                            data = json.load(f)
-                                        if not isinstance(data, dict):
-                                                        return {}
-                                                    return data
-except Exception:
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception:
         return {}
 
 
 def save_state(state: dict) -> None:
-        tmp = STATE_FILE + ".tmp"
+    tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
+        json.dump(state, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_FILE)
 
 
 # -------- Telegram --------
 def tg_send(msg: str) -> None:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
-                "chat_id": TG_CHAT,
-                "text": msg,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": False,
+        "chat_id": TG_CHAT,
+        "text": msg,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
     }
     for attempt in range(3):
-                try:
-                                r = requests.post(url, json=payload, timeout=10)
-                                r.raise_for_status()
-                                return
-                except Exception as e:
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            r.raise_for_status()
+            return
+        except Exception as e:
             if attempt == 2:
-                                print(f"[TG] Error al enviar mensaje: {e}", flush=True)
-                            time.sleep(2)
+                print(f"[TG] Error al enviar mensaje: {e}", flush=True)
+            time.sleep(2)
 
 
 # -------- HTTP helpers --------
 def fetch_html(url: str, extra_headers: dict | None = None, retries: int = 3) -> str:
-        """Descarga HTML con headers de browser. Retries incluidos."""
+    """Descarga HTML con headers de browser. Retries incluidos."""
     headers = dict(BROWSER_HEADERS)
     if extra_headers:
-                headers.update(extra_headers)
+        headers.update(extra_headers)
     for attempt in range(retries):
-                try:
-                                r = requests.get(url, headers=headers, timeout=20)
-                                r.raise_for_status()
-                                return r.text
-                except Exception as e:
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
             print(f"[fetch_html] intento {attempt+1}/{retries} fallo: {e}", flush=True)
             if attempt < retries - 1:
-                                time.sleep(3 * (attempt + 1))
-                    raise RuntimeError(f"No se pudo obtener HTML de {url} tras {retries} intentos")
+                time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"No se pudo obtener HTML de {url} tras {retries} intentos")
 
 
 # -------- Parsers de cada fuente --------
 def parse_zonakids(url: str) -> dict:
-        """
-            Zonakids - homepage con listado de productos Magento.
-                Paginamos con ?p=N buscando items con selectores Magento estandar.
-                    """
+    """
+    Zonakids - homepage con listado de productos Magento.
+    Paginamos con ?p=N buscando items con selectores Magento estandar.
+    """
     products: dict = {}
     page = 1
     while True:
-                purl = f"{url}?p={page}" if page > 1 else url
+        purl = f"{url}?p={page}" if page > 1 else url
         try:
-                        html_text = fetch_html(purl)
-except Exception as e:
+            html_text = fetch_html(purl)
+        except Exception as e:
             print(f"[Zonakids] pagina {page} fallo: {e}", flush=True)
             break
         soup = BeautifulSoup(html_text, "html.parser")
         items = soup.select(
-                        ".product-item, .item.product, "
-                        "li.item, .products-grid .item, "
-                        ".product-items .product-item"
+            ".product-item, .item.product, "
+            "li.item, .products-grid .item, "
+            ".product-items .product-item"
         )
         if not items:
-                        # Fallback: buscar cualquier link a producto
-                        found_new = False
+            found_new = False
             for a in soup.find_all("a", href=True):
-                                href = a["href"]
-                                if not ("zonakids" in href and ".html" in href):
-                                                        continue
-                                                    name = a.get_text(strip=True)
+                href = a["href"]
+                if not ("zonakids" in href and ".html" in href):
+                    continue
+                name = a.get_text(strip=True)
                 if not name or len(name) < 3:
-                                        img = a.find("img")
-                                        name = img.get("alt", "").strip() if img else ""
-                                    if not name:
-                                                            continue
+                    img = a.find("img")
+                    name = img.get("alt", "").strip() if img else ""
+                if not name:
+                    continue
                 pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
                 if pid and pid not in products:
-                                        products[pid] = {
-                                                                    "name": html.unescape(name),
-                                                                    "url": href,
-                                                                    "price": "",
-                                                                    "source": "Zonakids",
-                                        }
-                                        found_new = True
-                                if not found_new and page > 1:
-                                                    break
-                                                if not found_new:
-                                                                    break
-                                                                page += 1
+                    products[pid] = {
+                        "name": html.unescape(name),
+                        "url": href,
+                        "price": "",
+                        "source": "Zonakids",
+                    }
+                    found_new = True
+            if not found_new:
+                break
+            page += 1
             if page > 10:
-                                break
+                break
             time.sleep(0.5)
             continue
 
         found_new = False
         for item in items:
-                        a = (
-                                            item.select_one("a.product-item-link, a[class*='product']")
-                                            or item.find("a", href=True)
-                        )
+            a = (
+                item.select_one("a.product-item-link, a[class*='product']")
+                or item.find("a", href=True)
+            )
             if not a:
-                                continue
+                continue
             name = a.get_text(strip=True)
             href = a.get("href", "")
             if not name or not href:
-                                continue
+                continue
             pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
             price_el = item.select_one(".price")
             price = price_el.get_text(strip=True) if price_el else ""
             if pid and pid not in products:
-                                products[pid] = {
-                                    "name": html.unescape(name),
-                                    "url": href,
-                                    "price": price,
-                                    "source": "Zonakids",
-            }
+                products[pid] = {
+                    "name": html.unescape(name),
+                    "url": href,
+                    "price": price,
+                    "source": "Zonakids",
+                }
                 found_new = True
         if not found_new:
-                        break
+            break
         page += 1
         if page > 10:
-                        break
+            break
         time.sleep(0.5)
     return products
 
 
 def parse_tienda_panini(url: str) -> dict:
-        """
-            Tiendapanini.com.ar - homepage Magento con paginacion ?p=N.
-                """
+    """
+    Tiendapanini.com.ar - homepage Magento con paginacion ?p=N.
+    """
     products: dict = {}
     page = 1
     while True:
-                purl = f"{url}?p={page}" if page > 1 else url
+        purl = f"{url}?p={page}" if page > 1 else url
         try:
-                        html_text = fetch_html(purl)
-except Exception as e:
+            html_text = fetch_html(purl)
+        except Exception as e:
             print(f"[Tienda Panini] pagina {page} fallo: {e}", flush=True)
             break
         soup = BeautifulSoup(html_text, "html.parser")
         items = soup.select(
-                        ".product-item, .item.product, "
-                        "li.item, .products-grid .item, "
-                        ".product-items .product-item"
+            ".product-item, .item.product, "
+            "li.item, .products-grid .item, "
+            ".product-items .product-item"
         )
         if not items:
-                        # Fallback: buscar links con tiendapanini en la URL
-                        found_new = False
+            found_new = False
             for a in soup.find_all("a", href=True):
-                                href = a["href"]
+                href = a["href"]
                 if "tiendapanini" not in href and "panini" not in href.lower():
-                                        continue
-                                    if ".html" not in href and "/p/" not in href:
-                                                            continue
-                                                        name = a.get_text(strip=True)
+                    continue
+                if ".html" not in href and "/p/" not in href:
+                    continue
+                name = a.get_text(strip=True)
                 if not name or len(name) < 3:
-                                        img = a.find("img")
-                                        name = img.get("alt", "").strip() if img else ""
-                                    if not name:
-                                                            continue
-                                                        pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
+                    img = a.find("img")
+                    name = img.get("alt", "").strip() if img else ""
+                if not name:
+                    continue
+                pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
                 if pid and pid not in products:
-                                        products[pid] = {
-                                                                    "name": html.unescape(name),
-                                                                    "url": href,
-                                                                    "price": "",
-                                                                    "source": "Tienda Panini",
-                                        }
-                                        found_new = True
-                                if not found_new:
-                                                    break
-                                                page += 1
+                    products[pid] = {
+                        "name": html.unescape(name),
+                        "url": href,
+                        "price": "",
+                        "source": "Tienda Panini",
+                    }
+                    found_new = True
+            if not found_new:
+                break
+            page += 1
             if page > 10:
-                                break
+                break
             time.sleep(0.5)
             continue
 
         found_new = False
         for item in items:
-                        a = (
-                                            item.select_one("a.product-item-link, a[class*='product']")
-                                            or item.find("a", href=True)
-                        )
+            a = (
+                item.select_one("a.product-item-link, a[class*='product']")
+                or item.find("a", href=True)
+            )
             if not a:
-                                continue
+                continue
             name = a.get_text(strip=True)
             href = a.get("href", "")
             if not name or not href:
-                                continue
+                continue
             pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
             price_el = item.select_one(".price")
             price = price_el.get_text(strip=True) if price_el else ""
             if pid and pid not in products:
-                                products[pid] = {
-                                    "name": html.unescape(name),
-                                    "url": href,
-                                    "price": price,
-                                    "source": "Tienda Panini",
-            }
+                products[pid] = {
+                    "name": html.unescape(name),
+                    "url": href,
+                    "price": price,
+                    "source": "Tienda Panini",
+                }
                 found_new = True
         if not found_new:
-                        break
+            break
         page += 1
         if page > 10:
-                        break
+            break
         time.sleep(0.5)
     return products
 
 
 def _ml_page_url(base_url: str, page_num: int) -> str:
-        """
-            Genera la URL de paginacion de la pagina de Panini en ML.
-                ML usa offset 48 por pagina: _Desde_49_, _Desde_97_, etc.
-                    """
+    """
+    Genera la URL de paginacion de la pagina de Panini en ML.
+    ML usa offset 48 por pagina: _Desde_49_, _Desde_97_, etc.
+    """
     if page_num == 1:
-                return base_url
+        return base_url
     offset = (page_num - 1) * 48 + 1
     return f"{base_url}/_Desde_{offset}_NoIndex_True"
 
 
 def parse_ml_tienda(url: str) -> dict:
-        """
-            Scraping HTML paginado de la pagina Panini en MercadoLibre.
-                URL: https://www.mercadolibre.com.ar/pagina/paniniargentina
-                    """
+    """
+    Scraping HTML paginado de la pagina Panini en MercadoLibre.
+    URL: https://www.mercadolibre.com.ar/pagina/paniniargentina
+    """
     products: dict = {}
     pages_fetched = 0
 
     for page_num in range(1, ML_STORE_PAGES + 1):
-                page_url = _ml_page_url(url, page_num)
+        page_url = _ml_page_url(url, page_num)
         try:
-                        html_text = fetch_html(page_url)
-except Exception as e:
+            html_text = fetch_html(page_url)
+        except Exception as e:
             print(f"[ML HTML] pagina {page_num} fallo: {e}", flush=True)
             break
         soup = BeautifulSoup(html_text, "html.parser")
 
-        # Selectores de productos en ML
         items = soup.select(
-                        ".ui-search-result__wrapper, "
-                        ".andes-card--flat, "
-                        "li.ui-search-layout__item"
+            ".ui-search-result__wrapper, "
+            ".andes-card--flat, "
+            "li.ui-search-layout__item"
         )
 
         found_new = 0
         if not items:
-                        # Fallback: buscar todos los links con MLA en href
-                        for a in soup.find_all("a", href=True):
-                                            href = a["href"]
-                                            m = re.search(r"(MLA-?\d+)", href)
-                                            if not m:
-                                                                    continue
-                                                                pid = m.group(1).replace("-", "")
-                if pid in products:
-                                        continue
-                name = a.get_text(strip=True)
-                if not name:
-                                        img = a.find("img")
-                    name = img["alt"] if img and img.get("alt") else ""
-                if not name:
-                                        continue
-                clean_href = href.split("?")[0].split("#")[0]
-                products[pid] = {
-                                        "name": html.unescape(name.strip()),
-                                        "url": clean_href,
-                                        "price": "",
-                                        "source": "ML Tienda Panini",
-                }
-                found_new += 1
-else:
-            for item in items:
-                                name_el = item.select_one(
-                                                        ".ui-search-item__title, "
-                                                        "[class*='title'], "
-                                                        "h2, h3"
-                                )
-                name = name_el.get_text(strip=True) if name_el else ""
-                a = item.find("a", href=True)
-                if not a:
-                                        continue
+            for a in soup.find_all("a", href=True):
                 href = a["href"]
                 m = re.search(r"(MLA-?\d+)", href)
                 if not m:
-                                        continue
+                    continue
+                pid = m.group(1).replace("-", "")
+                if pid in products:
+                    continue
+                name = a.get_text(strip=True)
+                if not name:
+                    img = a.find("img")
+                    name = img["alt"] if img and img.get("alt") else ""
+                if not name:
+                    continue
+                clean_href = href.split("?")[0].split("#")[0]
+                products[pid] = {
+                    "name": html.unescape(name.strip()),
+                    "url": clean_href,
+                    "price": "",
+                    "source": "ML Tienda Panini",
+                }
+                found_new += 1
+        else:
+            for item in items:
+                name_el = item.select_one(
+                    ".ui-search-item__title, "
+                    "[class*='title'], "
+                    "h2, h3"
+                )
+                name = name_el.get_text(strip=True) if name_el else ""
+                a = item.find("a", href=True)
+                if not a:
+                    continue
+                href = a["href"]
+                m = re.search(r"(MLA-?\d+)", href)
+                if not m:
+                    continue
                 pid = m.group(1).replace("-", "")
                 if not name:
-                                        img = item.find("img")
+                    img = item.find("img")
                     name = img["alt"] if img and img.get("alt") else ""
                 if not name or pid in products:
-                                        continue
+                    continue
                 price_el = item.select_one(
-                                        ".andes-money-amount__fraction, "
-                                        ".price-tag-fraction, "
-                                        "[class*='price']"
+                    ".andes-money-amount__fraction, "
+                    ".price-tag-fraction, "
+                    "[class*='price']"
                 )
                 price = price_el.get_text(strip=True) if price_el else ""
                 clean_href = href.split("?")[0].split("#")[0]
                 products[pid] = {
-                                        "name": html.unescape(name.strip()),
-                                        "url": clean_href,
-                                        "price": price,
-                                        "source": "ML Tienda Panini",
+                    "name": html.unescape(name.strip()),
+                    "url": clean_href,
+                    "price": price,
+                    "source": "ML Tienda Panini",
                 }
                 found_new += 1
 
         pages_fetched += 1
         print(f"[ML HTML] pagina {page_num}: {found_new} nuevos, total {len(products)}", flush=True)
         if found_new == 0 and pages_fetched > 1:
-                        break
+            break
         if page_num < ML_STORE_PAGES:
-                        time.sleep(1)
+            time.sleep(1)
 
     print(f"[ML Tienda Panini] {len(products)} productos via HTML scraping ({pages_fetched} paginas)", flush=True)
     return products
@@ -391,38 +385,38 @@ else:
 
 # -------- SOURCES --------
 SOURCES = [
-        {
-                    "name": "Zonakids",
-                    "url": "https://zonakids.com/",
-                    "parser": parse_zonakids,
-        },
-        {
-                    "name": "Tienda Panini",
-                    "url": "https://tiendapanini.com.ar/",
-                    "parser": parse_tienda_panini,
-        },
-        {
-                    "name": "ML Tienda Panini",
-                    "url": ML_STORE_URL,
-                    "parser": parse_ml_tienda,
-        },
+    {
+        "name": "Zonakids",
+        "url": "https://zonakids.com/",
+        "parser": parse_zonakids,
+    },
+    {
+        "name": "Tienda Panini",
+        "url": "https://tiendapanini.com.ar/",
+        "parser": parse_tienda_panini,
+    },
+    {
+        "name": "ML Tienda Panini",
+        "url": ML_STORE_URL,
+        "parser": parse_ml_tienda,
+    },
 ]
 
 
 # -------- Comparacion y alertas --------
 def check_source(source: dict, state: dict) -> tuple[list[str], list[str]]:
-        """
-            Chequea una fuente.
-                Devuelve (alertas, errores).
-                    """
+    """
+    Chequea una fuente.
+    Devuelve (alertas, errores).
+    """
     name = source["name"]
     url = source["url"]
     alerts: list[str] = []
     errors: list[str] = []
 
     try:
-                current = source["parser"](url)
-except Exception as e:
+        current = source["parser"](url)
+    except Exception as e:
         err = f"{name}: {e}"
         errors.append(err)
         print(f"[ERROR] {err}", flush=True)
@@ -434,104 +428,103 @@ except Exception as e:
 
     matched: list = []
     for pid, prod in current.items():
-                if not matches_keywords(prod["name"]):
-                                continue
+        if not matches_keywords(prod["name"]):
+            continue
         prev_prod = prev.get(pid)
         if prev_prod is None:
-                        if not first_run:
-                                            prod["_alert_type"] = "nuevo"
+            if not first_run:
+                prod["_alert_type"] = "nuevo"
                 matched.append((pid, prod))
-else:
+        else:
             was_unavailable = prev_prod.get("unavailable", False)
             if was_unavailable:
-                                prod["_alert_type"] = "restock"
+                prod["_alert_type"] = "restock"
                 matched.append((pid, prod))
-elif prod.get("price") and prev_prod.get("price") and prod["price"] != prev_prod["price"]:
+            elif prod.get("price") and prev_prod.get("price") and prod["price"] != prev_prod["price"]:
                 prod["_alert_type"] = "precio"
                 prod["_old_price"] = prev_prod["price"]
                 matched.append((pid, prod))
 
     if matched and not first_run:
-                msgs: list[str] = []
+        msgs: list[str] = []
         for pid, prod in matched:
-                        atype = prod.get("_alert_type", "nuevo")
+            atype = prod.get("_alert_type", "nuevo")
             pname = prod["name"]
             purl = prod["url"]
             price = prod.get("price", "")
             if atype == "nuevo":
-                                header = "\U0001F6A8\u00a1NUEVO PRODUCTO DETECTADO!"
-elif atype == "restock":
+                header = "\U0001F6A8\u00a1NUEVO PRODUCTO DETECTADO!"
+            elif atype == "restock":
                 header = "\U0001F514 RESTOCK DETECTADO"
-else:
+            else:
                 header = "\U0001F4B0 CAMBIO DE PRECIO"
             price_line = f"\n\U0001F4B2 Precio: {price}" if price else ""
             if atype == "precio":
-                                price_line = f"\n\U0001F4B2 Precio: {prod.get('_old_price','')} -> {price}"
+                price_line = f"\n\U0001F4B2 Precio: {prod.get('_old_price','')} -> {price}"
             msg = (
-                                f"{header}\n"
-                                f"\U0001F3EA Tienda: {name}\n"
-                                f"\U0001F4E6 Producto: <b>{pname}</b>{price_line}\n"
-                                f"\U0001F517 <a href='{purl}'>VER AHORA &#x27A1;</a>\n"
-                                f"\u23F0 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+                f"{header}\n"
+                f"\U0001F3EA Tienda: {name}\n"
+                f"\U0001F4E6 Producto: <b>{pname}</b>{price_line}\n"
+                f"\U0001F517 <a href='{purl}'>VER AHORA</a>\n"
+                f"\u23F0 {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
             )
             msgs.append(msg)
         alerts.append("\n\n".join(msgs))
 
     if first_run and matched:
-                names_list = ", ".join(p["name"] for _, p in matched[:5])
+        names_list = ", ".join(p["name"] for _, p in matched[:5])
         summary = (
-                        f"\u2705 <b>Primera ejecucion - {name}</b>\n"
-                        f"Productos con keywords: {len(matched)}\n"
-                        f"Ejemplos: {names_list}"
+            f"\u2705 <b>Primera ejecucion - {name}</b>\n"
+            f"Productos con keywords: {len(matched)}\n"
+            f"Ejemplos: {names_list}"
         )
         alerts.append(summary)
 
-    # Actualizar estado
     state[name] = current
     return alerts, errors
 
 
 # -------- Loop principal --------
 def run_check() -> tuple[int, int]:
-        """Ejecuta un ciclo completo. Devuelve (n_alertas, n_errores)."""
+    """Ejecuta un ciclo completo. Devuelve (n_alertas, n_errores)."""
     state = load_state()
     all_alerts: list[str] = []
     all_errors: list[str] = []
 
     with ThreadPoolExecutor(max_workers=len(SOURCES)) as ex:
-                futures = {ex.submit(check_source, src, state): src["name"] for src in SOURCES}
+        futures = {ex.submit(check_source, src, state): src["name"] for src in SOURCES}
         for fut in as_completed(futures):
-                        src_name = futures[fut]
+            src_name = futures[fut]
             try:
-                                al, er = fut.result()
+                al, er = fut.result()
                 all_alerts.extend(al)
                 all_errors.extend(er)
-except Exception as e:
+            except Exception as e:
                 all_errors.append(f"{src_name}: excepcion inesperada: {e}")
 
     save_state(state)
 
     for msg in all_alerts:
-                tg_send(msg)
+        tg_send(msg)
 
     if all_errors:
-                err_msg = "\u26A0\uFE0F <b>Errores en el monitor</b>\n" + "\n".join(f"\u2022 {e}" for e in all_errors)
+        err_msg = "\u26A0\uFE0F <b>Errores en el monitor</b>\n" + "\n".join(f"\u2022 {e}" for e in all_errors)
         tg_send(err_msg)
 
     return len(all_alerts), len(all_errors)
 
 
 def main() -> None:
-        runs = int(os.environ.get("RUNS", "3"))
+    runs = int(os.environ.get("RUNS", "3"))
     sleep_s = int(os.environ.get("SLEEP", "90"))
     for i in range(1, runs + 1):
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [Run {i}/{runs}] Procesando {len(SOURCES)} sitios en paralelo...", flush=True)
         n_al, n_er = run_check()
         print(f"[{ts}] [Run {i}/{runs}] Listo. {n_al} alertas, {n_er} errores.", flush=True)
         if i < runs:
-                        time.sleep(sleep_s)
+            time.sleep(sleep_s)
 
 
 if __name__ == "__main__":
-        main()
+    main()
