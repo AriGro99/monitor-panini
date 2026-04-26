@@ -106,10 +106,9 @@ def fetch_html(url: str, retries: int = 3) -> str:
 # -------- Parser Magento generico (Zonakids + Tienda Panini) --------
 def parse_magento(url: str, source_name: str) -> dict:
     """
-    Scraping de tiendas Magento.
-    Selector principal: li.product-item + strong.product-item-name + a.product-item-link
-    Pagina con ?p=N.
-    Guarda TODOS los productos (sin filtrar por keyword).
+    Scraping de tiendas Magento (Zonakids, Tienda Panini).
+    Usa find_all() en lugar de select() para mayor robustez.
+    Guarda TODOS los productos sin filtrar por keyword.
     """
     products: dict = {}
     page = 1
@@ -122,16 +121,24 @@ def parse_magento(url: str, source_name: str) -> dict:
             break
 
         soup = BeautifulSoup(html_text, "html.parser")
-        items = soup.select("li.product-item")
+
+        # Intentar multiples selectores para maxima compatibilidad
+        items = soup.find_all("li", class_="product-item")
+        if not items:
+            items = soup.find_all("li", class_=lambda c: c and "product-item" in c)
+        print(f"[{source_name}] p{page}: {len(items)} items (html={len(html_text)}b)", flush=True)
 
         if not items:
-            print(f"[{source_name}] p{page}: sin items, fin.", flush=True)
             break
 
         found = 0
         for item in items:
-            name_el = item.select_one("strong.product-item-name")
-            link_el = item.select_one("a.product-item-link") or item.find("a", href=True)
+            name_el = item.find("strong", class_="product-item-name")
+            if not name_el:
+                name_el = item.find(class_=lambda c: c and "product-item-name" in c)
+            link_el = item.find("a", class_="product-item-link")
+            if not link_el:
+                link_el = item.find("a", href=True)
             if not name_el or not link_el:
                 continue
             name = html.unescape(name_el.get_text(strip=True))
@@ -139,7 +146,7 @@ def parse_magento(url: str, source_name: str) -> dict:
             if not name or not href:
                 continue
             pid = re.sub(r"[^a-z0-9]", "", name.lower())[:40]
-            price_el = item.select_one(".price")
+            price_el = item.find(class_="price")
             price = price_el.get_text(strip=True) if price_el else ""
             if pid and pid not in products:
                 products[pid] = {"name": name, "url": href, "price": price, "source": source_name}
@@ -151,16 +158,6 @@ def parse_magento(url: str, source_name: str) -> dict:
         page += 1
         time.sleep(0.5)
     return products
-
-
-# -------- Parser MercadoLibre --------
-def _ml_page_url(page_num: int) -> str:
-    if page_num == 1:
-        return ML_STORE_URL
-    offset = (page_num - 1) * 48 + 1
-    return f"{ML_STORE_URL}/_Desde_{offset}_NoIndex_True"
-
-
 def parse_ml_tienda(url: str) -> dict:
     """
     Scraping de la tienda oficial Panini en ML: /tienda/panini
