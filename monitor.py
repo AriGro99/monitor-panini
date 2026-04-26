@@ -285,8 +285,7 @@ def _ml_page_url(base_url: str, page_num: int) -> str:
     """
     if page_num == 1:
         return base_url
-    offset = (page_num - 1) * 48 + 1
-    return f"{base_url}/_Desde_{offset}_NoIndex_True"
+    return f"{base_url}?page={page_num}"
 
 
 def parse_ml_tienda(url: str) -> dict:
@@ -387,12 +386,12 @@ def parse_ml_tienda(url: str) -> dict:
 SOURCES = [
     {
         "name": "Zonakids",
-        "url": "https://zonakids.com/",
+        "url": "https://zonakids.com/catalogsearch/result/?q=panini",
         "parser": parse_zonakids,
     },
     {
         "name": "Tienda Panini",
-        "url": "https://tiendapanini.com.ar/",
+        "url": "https://tiendapanini.com.ar/catalogsearch/result/?q=mundial",
         "parser": parse_tienda_panini,
     },
     {
