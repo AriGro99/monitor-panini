@@ -139,7 +139,9 @@ def parse_zonakids(url: str) -> dict:
             found_new = False
             for a in soup.find_all("a", href=True):
                 href = a["href"]
-                if not ("zonakids" in href and ".html" in href):
+                if not href.endswith(".html") and "/catalogsearch/" not in href:
+                    continue
+                if href.startswith("http") and "zonakids.com" not in href:
                     continue
                 name = a.get_text(strip=True)
                 if not name or len(name) < 3:
@@ -219,9 +221,9 @@ def parse_tienda_panini(url: str) -> dict:
             found_new = False
             for a in soup.find_all("a", href=True):
                 href = a["href"]
-                if "tiendapanini" not in href and "panini" not in href.lower():
+                if not href.endswith(".html") and "/p/" not in href and "/product/" not in href:
                     continue
-                if ".html" not in href and "/p/" not in href:
+                if href.startswith("http") and "tiendapanini.com" not in href:
                     continue
                 name = a.get_text(strip=True)
                 if not name or len(name) < 3:
@@ -386,12 +388,12 @@ def parse_ml_tienda(url: str) -> dict:
 SOURCES = [
     {
         "name": "Zonakids",
-        "url": "https://zonakids.com/catalogsearch/result/?q=panini",
+        "url": "https://zonakids.com/",
         "parser": parse_zonakids,
     },
     {
         "name": "Tienda Panini",
-        "url": "https://tiendapanini.com.ar/catalogsearch/result/?q=mundial",
+        "url": "https://tiendapanini.com.ar/",
         "parser": parse_tienda_panini,
     },
     {
